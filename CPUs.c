@@ -14,7 +14,7 @@
  *          All accesses to readyQ and finishedQ are protected by their
  *          respective mutex locks.
  * ===========================================================
- * Documentation Statement: <describe any help received>
+ * Documentation Statement: None
  * =========================================================== */
 
 #include <stdio.h>
@@ -206,10 +206,59 @@ void* RRcpu(void* param) {
     int threadNum = ((CpuParams*) param)->threadNumber;
     SharedVars* svars = ((CpuParams*) param)->svars;
 
-    // Process* p = NULL;  // TODO: uncomment when you implement this function
+    Process* p = NULL;
+    int quantum = 0; // quantum var to track timesteps
 
     while (1) {
         sem_wait(svars->cpuSems[threadNum]);
+
+        // ── Preemption (if running & after every quantum timesteps) ──────
+        if (p != NULL && quantum == 0) {
+            pthread_mutex_lock(&(svars->readyQLock));
+
+            // set requeued field to true when inserted back into readyQ
+            p->requeued = true;
+            
+            qInsert(&(svars->readyQ), p);
+
+            pthread_mutex_unlock(&(svars->readyQLock));
+
+            p = NULL;
+        }
+
+        // ── Selection (only when idle) ───────────────────────────────────
+        if (p == NULL) {
+            pthread_mutex_lock(&(svars->readyQLock));
+
+            p = qRemove(&(svars->readyQ), 0);
+
+            if (p == NULL) {
+                printf("No process to schedule\n");
+            } else {
+                printf("Scheduling PID %d\n", p->PID);
+
+                quantum = svars->quantum; // reset quantum with new process
+            }
+
+            pthread_mutex_unlock(&(svars->readyQLock));
+        }
+
+        // ── Execution: one unit of work ──────────────────────────────────
+        if (p != NULL) {
+            p->burstRemaining--;
+            quantum--; // decrement quantum
+
+            if (p->burstRemaining == 0) {
+                pthread_mutex_lock(&(svars->finishedQLock));
+
+                qInsert(&(svars->finishedQ), p);
+
+                pthread_mutex_unlock(&(svars->finishedQLock));
+
+                p = NULL;
+            }
+        }
+
 
         sem_post(svars->mainSem);
     }
@@ -230,23 +279,24 @@ void* SRTFcpu(void* param) {
         sem_wait(svars->cpuSems[threadNum]);
 
         // ── Preemption (if running & shorter job in readyQ) ──────────────
-        if (p != NULL && svars->readyQ.head != NULL) {
+        if (p != NULL) {
             // finds smallest burstRemaining value in the queue
             int minBR = qShortestBR(&(svars->readyQ));
+
+            // lock readyQ before inspecting in if statement
+            pthread_mutex_lock(&(svars->readyQLock));
 
             // preempts running process when a shorter job arrives
             if (minBR < p->burstRemaining) {
                 // set requeued field to true when inserted back into readyQ
                 p->requeued = true;
 
-                pthread_mutex_lock(&(svars->finishedQLock));
-
                 qInsert(&(svars->readyQ), p);
-
-                pthread_mutex_unlock(&(svars->finishedQLock));
 
                 p = NULL;
             }
+
+            pthread_mutex_unlock(&(svars->readyQLock));
         }
 
         // ── Selection (only when idle) ───────────────────────────────────
@@ -299,23 +349,24 @@ void* PPcpu(void* param) {
         sem_wait(svars->cpuSems[threadNum]);
 
         // ── Preemption (if running & higher priority job in readyQ) ──────
-        if (p != NULL && svars->readyQ.head != NULL) {
+        if (p != NULL) {
             // finds best/lowest priority number in the queue
             int minPriority = qGetPriority(&(svars->readyQ));
+
+            // lock readyQ before inspecting in if statement
+            pthread_mutex_lock(&(svars->readyQLock));
 
             // preempts running process when a strictly higher-priority job arrives
             if (minPriority < p->priority) {
                 // set requeued field to true when inserted back into readyQ
                 p->requeued = true;
 
-                pthread_mutex_lock(&(svars->finishedQLock));
-
                 qInsert(&(svars->readyQ), p);
-
-                pthread_mutex_unlock(&(svars->finishedQLock));
 
                 p = NULL;
             }
+
+            pthread_mutex_unlock(&(svars->readyQLock));
         }
 
         // ── Selection (only when idle) ───────────────────────────────────
